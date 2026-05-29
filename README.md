@@ -1,0 +1,1 @@
+# AutoMind_PowerBI_Trickys
