@@ -1,14 +1,19 @@
 /*!
  * AutoMindScatter3D.js
- * v1.0.15 - Bigger Logo + More Axis Ticks + Robust LaTeX Axis Labels
+ * v1.0.16 - Real KaTeX LaTeX Axis Labels + Bigger Logo + More Axis Ticks
  *
  * Correcciones:
+ * - Renderizado real de LaTeX con KaTeX para labels de ejes y ticks.
+ * - Fallback HTML si KaTeX no carga.
+ * - Repara strings mal escritos como "\mathrm{z}" en JS, donde JS convierte \r en carriage return.
+ * - Soporta labels escritos como:
+ *      String.raw`\mathrm{z}`
+ *      "\\mathrm{z}"
+ *      "\mathrm{z}"   // también intenta repararlo
  * - Logo AutoMind más grande por defecto.
  * - Más medidas/ticks en los ejes.
- * - Los labels de ejes se renderizan como HTML estilo LaTeX, sobrepuesto y nítido.
- * - Soporta \mathrm{z} y también mathrm{z} cuando JS elimina el backslash por escribir "\mathrm{z}".
  * - Se eliminan los ticks con valor 0.
- * - El badge muestra solamente la imagen, sin texto AutoMindCloud duplicado.
+ * - El badge muestra solamente la imagen.
  * - No muestra textos tipo "resolviendo sha actual del main...".
  *
  * Funciones globales:
@@ -20,10 +25,13 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.0.15-BIGGER_LOGO_MORE_AXIS_TICKS";
+  const VERSION = "1.0.16-KATEX_LATEX_LABELS";
 
   const THREE_URL = "https://unpkg.com/three@0.160.0/build/three.module.js";
   const ORBIT_URL = "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
+
+  const KATEX_CSS_URL = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css";
+  const KATEX_JS_URL = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js";
 
   const DEFAULT_LOGO_URL =
     "https://raw.githubusercontent.com/artemioadaysolvers/AutoMindCloudExperimental/main/AutoMindCloud/AutoMindCloud2.png";
@@ -42,7 +50,9 @@
   ];
 
   const HANDLES = new Map();
+
   let loaderPromise = null;
+  let katexPromise = null;
 
   function getContainer(containerOrId) {
     if (typeof containerOrId === "string") return document.getElementById(containerOrId);
@@ -59,6 +69,91 @@
     })();
 
     return loaderPromise;
+  }
+
+  function ensureBaseStyles() {
+    if (document.getElementById("automind-scatter3d-base-style")) return;
+
+    const style = document.createElement("style");
+    style.id = "automind-scatter3d-base-style";
+    style.textContent = `
+      .automind-3d-html-label {
+        box-sizing: border-box;
+        pointer-events: none;
+        user-select: none;
+      }
+
+      .automind-3d-html-label .katex {
+        font-size: 1em !important;
+        line-height: 1 !important;
+      }
+
+      .automind-3d-html-label .katex-html {
+        line-height: 1 !important;
+      }
+
+      .automind-3d-html-label sub,
+      .automind-3d-html-label sup {
+        line-height: 0;
+      }
+
+      .automind-3d-badge-image-only img {
+        display: block;
+      }
+    `;
+
+    document.head.appendChild(style);
+  }
+
+  function loadKaTeX() {
+    if (window.katex && typeof window.katex.render === "function") {
+      return Promise.resolve(window.katex);
+    }
+
+    if (katexPromise) return katexPromise;
+
+    katexPromise = new Promise((resolve, reject) => {
+      try {
+        if (!document.querySelector('link[data-automind-katex-css="1"]')) {
+          const link = document.createElement("link");
+          link.rel = "stylesheet";
+          link.href = KATEX_CSS_URL;
+          link.crossOrigin = "anonymous";
+          link.setAttribute("data-automind-katex-css", "1");
+          document.head.appendChild(link);
+        }
+
+        const existing = document.querySelector('script[data-automind-katex-js="1"]');
+        if (existing) {
+          existing.addEventListener("load", () => resolve(window.katex));
+          existing.addEventListener("error", reject);
+          return;
+        }
+
+        const script = document.createElement("script");
+        script.src = KATEX_JS_URL;
+        script.async = true;
+        script.defer = true;
+        script.crossOrigin = "anonymous";
+        script.setAttribute("data-automind-katex-js", "1");
+
+        script.onload = () => {
+          if (window.katex && typeof window.katex.render === "function") {
+            resolve(window.katex);
+          } else {
+            reject(new Error("KaTeX cargó, pero window.katex.render no existe."));
+          }
+        };
+
+        script.onerror = () => reject(new Error("No se pudo cargar KaTeX."));
+
+        document.head.appendChild(script);
+      } catch (err) {
+        reject(err);
+      }
+    });
+
+    return katexPromise;
   }
 
   function toNumber(v, fallback = NaN) {
@@ -85,6 +180,119 @@
     if (s.startsWith("\\[") && s.endsWith("\\]")) return s.slice(2, -2).trim();
 
     return s;
+  }
+
+  function escapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function normalizeLatexInput(input) {
+    let s = stripMathDelimiters(input);
+
+    if (!s) return "";
+
+    /*
+      IMPORTANTE:
+      Si escribes esto en JS:
+          "\mathrm{z}"
+      JS interpreta "\r" como carriage return.
+      Entonces realmente queda:
+          "\r" + "mathrm{z}"
+
+      También pasa con:
+        "\theta" -> tab + "heta"
+        "\frac"  -> form feed + "rac"
+        "\beta"  -> backspace + "eta"
+        "\nabla" -> newline + "abla"
+
+      Esta sección repara esos casos comunes.
+    */
+    s = s
+      .replace(/\r\s*mathrm/g, "\\mathrm")
+      .replace(/\r\s*right/g, "\\right")
+      .replace(/\r\s*ho/g, "\\rho")
+
+      .replace(/\t\s*heta/g, "\\theta")
+      .replace(/\t\s*imes/g, "\\times")
+      .replace(/\t\s*ext/g, "\\text")
+      .replace(/\t\s*au/g, "\\tau")
+
+      .replace(/\f\s*rac/g, "\\frac")
+
+      .replace(/\x08\s*eta/g, "\\beta")
+
+      .replace(/\n\s*abla/g, "\\nabla")
+      .replace(/\n\s*u/g, "\\nu")
+
+      .replace(/\v\s*ar/g, "\\var");
+
+    /*
+      Si escribiste "\alpha" en JS, como "\a" no es escape válido,
+      muchas veces queda como "alpha" sin backslash.
+      Aquí agregamos backslash a comandos LaTeX conocidos escritos sin "\".
+    */
+    const bareCommands = [
+      "mathrm",
+      "text",
+      "operatorname",
+      "mathbf",
+      "boldsymbol",
+      "mathit",
+      "mathsf",
+      "frac",
+      "sqrt",
+      "sum",
+      "prod",
+      "int",
+      "lim",
+      "sin",
+      "cos",
+      "tan",
+      "log",
+      "ln",
+      "exp",
+      "min",
+      "max",
+      "argmin",
+      "argmax",
+      "left",
+      "right",
+      "cdot",
+      "times",
+      "pm",
+      "mp",
+      "leq",
+      "geq",
+      "neq",
+      "approx",
+      "infty",
+      "alpha",
+      "beta",
+      "gamma",
+      "delta",
+      "epsilon",
+      "varepsilon",
+      "theta",
+      "lambda",
+      "mu",
+      "nu",
+      "pi",
+      "rho",
+      "sigma",
+      "phi",
+      "varphi",
+      "omega",
+      "Delta",
+      "Sigma",
+      "Omega"
+    ];
+
+    for (const cmd of bareCommands) {
+      const re = new RegExp("(^|[^\\\\A-Za-z])(" + escapeRegExp(cmd) + ")(?=\\s*\\{|\\b)", "g");
+      s = s.replace(re, "$1\\$2");
+    }
+
+    return s.trim();
   }
 
   function findCommandArg(s, command) {
@@ -121,6 +329,41 @@
     return null;
   }
 
+  function findTwoCommandArgs(s, command) {
+    const first = findCommandArg(s, command);
+    if (!first) return null;
+
+    const rest = s.slice(first.end);
+    if (!rest.startsWith("{")) return null;
+
+    let depth = 0;
+    let content = "";
+
+    for (let i = 0; i < rest.length; i++) {
+      const ch = rest[i];
+
+      if (ch === "{") {
+        depth++;
+        if (depth > 1) content += ch;
+      } else if (ch === "}") {
+        depth--;
+        if (depth === 0) {
+          return {
+            start: first.start,
+            end: first.end + i + 1,
+            a: first.content,
+            b: content
+          };
+        }
+        content += ch;
+      } else {
+        content += ch;
+      }
+    }
+
+    return null;
+  }
+
   function replaceCommandWithSpan(s, command, style) {
     let guard = 0;
 
@@ -139,13 +382,65 @@
   }
 
   function replaceCommandVariantsWithSpan(s, commandName, style) {
-    /*
-      Soporta:
-        "\\mathrm{z}"  -> correcto en JS si escribes "\\mathrm{z}" o String.raw`\mathrm{z}`
-        "mathrm{z}"   -> pasa cuando escribes "\mathrm{z}" y JS se come el backslash
-    */
     s = replaceCommandWithSpan(s, "\\" + commandName, style);
     s = replaceCommandWithSpan(s, commandName, style);
+    return s;
+  }
+
+  function replaceFracFallback(s) {
+    let guard = 0;
+
+    while ((s.includes("\\frac") || s.includes("frac")) && guard < 100) {
+      guard++;
+
+      let found = findTwoCommandArgs(s, "\\frac");
+      let commandLen = "\\frac".length;
+
+      if (!found) {
+        found = findTwoCommandArgs(s, "frac");
+        commandLen = "frac".length;
+      }
+
+      if (!found) break;
+
+      const numerator = latexToHTML(found.a);
+      const denominator = latexToHTML(found.b);
+
+      const replacement =
+        `<span style="display:inline-flex;flex-direction:column;align-items:center;vertical-align:middle;line-height:1;">` +
+        `<span style="display:block;border-bottom:1px solid currentColor;padding:0 0.08em;">${numerator}</span>` +
+        `<span style="display:block;padding:0 0.08em;">${denominator}</span>` +
+        `</span>`;
+
+      s = s.slice(0, found.start) + replacement + s.slice(found.end);
+
+      if (commandLen <= 0) break;
+    }
+
+    return s;
+  }
+
+  function replaceSqrtFallback(s) {
+    let guard = 0;
+
+    while ((s.includes("\\sqrt") || s.includes("sqrt")) && guard < 100) {
+      guard++;
+
+      let found = findCommandArg(s, "\\sqrt");
+      if (!found) found = findCommandArg(s, "sqrt");
+
+      if (!found) break;
+
+      const inner = latexToHTML(found.content);
+      const replacement =
+        `<span style="display:inline-flex;align-items:flex-start;">` +
+        `<span style="font-size:1.05em;">√</span>` +
+        `<span style="border-top:1px solid currentColor;padding-left:0.06em;">${inner}</span>` +
+        `</span>`;
+
+      s = s.slice(0, found.start) + replacement + s.slice(found.end);
+    }
+
     return s;
   }
 
@@ -170,7 +465,7 @@
   }
 
   function latexToHTML(input) {
-    let s = stripMathDelimiters(input);
+    let s = normalizeLatexInput(input);
     if (!s) return "";
 
     s = htmlEscape(s);
@@ -183,6 +478,9 @@
       .replace(/\\\$/g, "$")
       .replace(/\\\{/g, "{")
       .replace(/\\\}/g, "}");
+
+    s = replaceFracFallback(s);
+    s = replaceSqrtFallback(s);
 
     s = replaceCommandVariantsWithSpan(s, "mathrm", "font-style:normal;font-weight:400;");
     s = replaceCommandVariantsWithSpan(s, "text", "font-style:normal;font-weight:400;");
@@ -221,12 +519,16 @@
       ["delta", "δ"],
       ["\\epsilon", "ε"],
       ["epsilon", "ε"],
+      ["\\varepsilon", "ε"],
+      ["varepsilon", "ε"],
       ["\\theta", "θ"],
       ["theta", "θ"],
       ["\\lambda", "λ"],
       ["lambda", "λ"],
       ["\\mu", "μ"],
       ["mu", "μ"],
+      ["\\nu", "ν"],
+      ["nu", "ν"],
       ["\\pi", "π"],
       ["pi", "π"],
       ["\\rho", "ρ"],
@@ -235,6 +537,8 @@
       ["sigma", "σ"],
       ["\\phi", "φ"],
       ["phi", "φ"],
+      ["\\varphi", "φ"],
+      ["varphi", "φ"],
       ["\\omega", "ω"],
       ["omega", "ω"],
       ["\\Delta", "Δ"],
@@ -257,11 +561,58 @@
     return s;
   }
 
+  function patchSupSub(div) {
+    const supSubCss = "line-height:0;position:relative;vertical-align:baseline;";
+    const subCss = supSubCss + "bottom:-0.25em;font-size:70%;";
+    const supCss = supSubCss + "top:-0.45em;font-size:70%;";
+
+    for (const sub of div.querySelectorAll("sub")) {
+      sub.setAttribute("style", subCss);
+    }
+
+    for (const sup of div.querySelectorAll("sup")) {
+      sup.setAttribute("style", supCss);
+    }
+  }
+
+  function renderLatexIntoElement(div, latex, options = {}) {
+    const normalized = normalizeLatexInput(latex);
+
+    div.setAttribute("data-automind-latex", normalized);
+    div.innerHTML = latexToHTML(normalized);
+    patchSupSub(div);
+
+    if (options.useKatex === false) return;
+
+    loadKaTeX()
+      .then((katex) => {
+        if (!div.isConnected) return;
+
+        try {
+          katex.render(normalized, div, {
+            throwOnError: false,
+            displayMode: false,
+            strict: "ignore",
+            trust: true,
+            output: "html"
+          });
+
+          div.classList.add("automind-katex-ready");
+        } catch (err) {
+          div.innerHTML = latexToHTML(normalized);
+          patchSupSub(div);
+        }
+      })
+      .catch(() => {
+        div.innerHTML = latexToHTML(normalized);
+        patchSupSub(div);
+      });
+  }
+
   function makeHTMLLabel(container, latex, options = {}) {
     const div = document.createElement("div");
 
     div.className = "automind-3d-html-label";
-    div.innerHTML = latexToHTML(latex);
 
     div.style.position = "absolute";
     div.style.left = "0px";
@@ -279,17 +630,9 @@
     div.style.textShadow = options.textShadow || "0 0 1px rgba(255,255,255,0.95)";
     div.style.userSelect = "none";
 
-    const supSubCss = "line-height:0;position:relative;vertical-align:baseline;";
-    const subCss = supSubCss + "bottom:-0.25em;font-size:70%;";
-    const supCss = supSubCss + "top:-0.45em;font-size:70%;";
-
-    for (const sub of div.querySelectorAll("sub")) {
-      sub.setAttribute("style", subCss);
-    }
-
-    for (const sup of div.querySelectorAll("sup")) {
-      sup.setAttribute("style", supCss);
-    }
+    renderLatexIntoElement(div, latex, {
+      useKatex: options.useKatex !== false
+    });
 
     container.appendChild(div);
 
@@ -543,6 +886,8 @@
     const container = getContainer(options.container || options.containerId || "viewer");
     if (!container) throw new Error("No se encontró el contenedor.");
 
+    ensureBaseStyles();
+
     destroyAutoMindScatter3D(container);
     clearContainer(container);
 
@@ -677,21 +1022,24 @@
       world: new THREE.Vector3(axisLen + 0.42, 0, 0),
       fontSize: options.axisLabelFontSize ?? 18,
       fontWeight: "700",
-      fontStyle: "italic"
+      fontStyle: "italic",
+      useKatex: options.useKatex !== false
     }));
 
     htmlLabels.push(makeHTMLLabel(container, options.yLabelLatex || yField, {
       world: new THREE.Vector3(0, axisLen + 0.42, 0),
       fontSize: options.axisLabelFontSize ?? 18,
       fontWeight: "700",
-      fontStyle: "italic"
+      fontStyle: "italic",
+      useKatex: options.useKatex !== false
     }));
 
     htmlLabels.push(makeHTMLLabel(container, options.zLabelLatex || zField, {
       world: new THREE.Vector3(0, 0, axisLen + 0.42),
       fontSize: options.axisLabelFontSize ?? 18,
       fontWeight: "700",
-      fontStyle: "italic"
+      fontStyle: "italic",
+      useKatex: options.useKatex !== false
     }));
 
     const tickCount = options.tickCount ?? 7;
@@ -729,7 +1077,8 @@
           fontSize: options.tickFontSize ?? 10,
           fontWeight: "400",
           fontStyle: "normal",
-          textShadow: "0 0 2px rgba(255,255,255,0.95)"
+          textShadow: "0 0 2px rgba(255,255,255,0.95)",
+          useKatex: options.useKatex !== false
         }));
       }
     }
@@ -775,7 +1124,8 @@
       renderer,
       controls,
       resizeObserver,
-      raf
+      raf,
+      htmlLabels
     };
 
     HANDLES.set(container, handle);
@@ -801,7 +1151,8 @@
     renderFromCsvUrl: renderAutoMindScatter3DFromCsvUrl,
     destroy: destroyAutoMindScatter3D,
     parseCsv,
-    latexToHTML
+    latexToHTML,
+    normalizeLatexInput
   };
 
   window.renderAutoMindScatter3D = renderAutoMindScatter3D;
