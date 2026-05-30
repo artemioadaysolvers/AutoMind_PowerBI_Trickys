@@ -1,19 +1,13 @@
 /*!
  * AutoMindScatter3D.js
- * v1.0.17 - Fix bare module specifier "three" + Real KaTeX LaTeX Labels
+ * v1.0.18 - Thin Arrow Heads + Perspective-Scaled Tick Labels
  *
  * Correcciones:
- * - Arregla error:
- *   Failed to resolve module specifier "three".
- * - NO usa OrbitControls directo desde unpkg sin resolver dependencias.
- * - Carga Three.js y OrbitControls desde esm.sh con bundle.
- * - Incluye fallback que parchea OrbitControls.js reemplazando `from "three"` por una URL blob.
- * - Renderizado real de LaTeX con KaTeX para labels de ejes y ticks.
- * - Fallback HTML si KaTeX no carga.
- * - Logo AutoMind más grande por defecto.
- * - Más medidas/ticks en los ejes.
- * - Se eliminan los ticks con valor 0.
- * - El badge muestra solamente la imagen.
+ * - Punta de flechas más delgada.
+ * - Las medidas/ticks cambian de tamaño con la distancia de cámara.
+ * - Evita que los números se vean gigantes al alejar el visor.
+ * - Mantiene fix para "Failed to resolve module specifier 'three'".
+ * - Renderizado LaTeX con KaTeX + fallback HTML.
  *
  * Funciones globales:
  *   window.renderAutoMindScatter3D(options)
@@ -24,17 +18,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.0.17-FIX_THREE_BARE_MODULE_KATEX";
-
-  /*
-    NO usar esto:
-      https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js
-
-    porque ese archivo importa:
-      from "three"
-
-    y Power BI / navegador no puede resolver "three" como bare module.
-  */
+  const VERSION = "1.0.18-THIN_ARROWS_PERSPECTIVE_TICKS";
 
   const THREE_VERSION = "0.160.0";
 
@@ -129,23 +113,8 @@
   }
 
   async function loadThreeFromPatchedUnpkg() {
-    /*
-      Fallback robusto:
-      - Descarga three.module.js.
-      - Lo convierte a blob URL.
-      - Descarga OrbitControls.js.
-      - Reemplaza:
-            from 'three'
-            from "three"
-        por:
-            from '<threeBlobUrl>'
-      - Importa OrbitControls ya parcheado.
-
-      Esto elimina completamente el error:
-        Failed to resolve module specifier "three".
-    */
-
     const threeCode = await loadText(THREE_UNPKG_MODULE_URL);
+
     const threeBlobUrl = URL.createObjectURL(
       new Blob([threeCode], { type: "text/javascript" })
     );
@@ -212,6 +181,7 @@
         box-sizing: border-box;
         pointer-events: none;
         user-select: none;
+        transform-origin: center center;
       }
 
       .automind-3d-html-label .katex {
@@ -322,15 +292,6 @@
 
     if (!s) return "";
 
-    /*
-      Si escribes esto en JS:
-          "\mathrm{z}"
-      JS interpreta "\r" como carriage return.
-      Entonces realmente queda:
-          "\r" + "mathrm{z}"
-
-      Esta sección repara casos comunes.
-    */
     s = s
       .replace(/\r\s*mathrm/g, "\\mathrm")
       .replace(/\r\s*right/g, "\\right")
@@ -722,6 +683,8 @@
   }
 
   function makeHTMLLabel(container, latex, options = {}) {
+    const baseFontSize = Number(options.fontSize ?? 13);
+
     const div = document.createElement("div");
 
     div.className = "automind-3d-html-label";
@@ -734,7 +697,7 @@
     div.style.pointerEvents = "none";
     div.style.color = options.color || "#000000";
     div.style.fontFamily = options.fontFamily || '"Times New Roman", "Cambria Math", Georgia, serif';
-    div.style.fontSize = (options.fontSize ?? 13) + "px";
+    div.style.fontSize = baseFontSize + "px";
     div.style.fontWeight = options.fontWeight || "700";
     div.style.fontStyle = options.fontStyle || "italic";
     div.style.lineHeight = "1";
@@ -753,8 +716,18 @@
       world: options.world,
       xOffset: options.xOffset || 0,
       yOffset: options.yOffset || 0,
-      hideBehindCamera: options.hideBehindCamera !== false
+      hideBehindCamera: options.hideBehindCamera !== false,
+
+      baseFontSize,
+      minFontSize: Number(options.minFontSize ?? Math.max(5, baseFontSize * 0.55)),
+      maxFontSize: Number(options.maxFontSize ?? baseFontSize),
+      perspectiveScale: options.perspectiveScale === true,
+      distanceReference: Number(options.distanceReference || 1)
     };
+  }
+
+  function clamp(v, a, b) {
+    return Math.max(a, Math.min(b, v));
   }
 
   function updateHTMLLabels(labels, camera, renderer) {
@@ -778,6 +751,21 @@
 
       const x = (p.x * 0.5 + 0.5) * width + label.xOffset;
       const y = (-p.y * 0.5 + 0.5) * height + label.yOffset;
+
+      if (label.perspectiveScale) {
+        const d = camera.position.distanceTo(label.world);
+        const ref = label.distanceReference || d || 1;
+
+        /*
+          Antes los ticks eran HTML fijo, por eso se veían enormes al alejar.
+          Ahora disminuyen con la distancia de cámara, pero con límites para que no desaparezcan.
+        */
+        const factor = clamp(ref / Math.max(d, 0.0001), 0.50, 1.00);
+        const fontSize = clamp(label.baseFontSize * factor, label.minFontSize, label.maxFontSize);
+
+        label.element.style.fontSize = fontSize + "px";
+        label.element.style.opacity = String(clamp(0.65 + factor * 0.35, 0.65, 1));
+      }
 
       label.element.style.display = "block";
       label.element.style.transform = `translate(${x}px, ${y}px) translate(-50%, -50%)`;
@@ -807,15 +795,18 @@
     return new THREE.Line(g, m);
   }
 
-  function makeArrowHead(THREE, position, direction, color = 0x000000, size = 0.28) {
+  function makeArrowHead(THREE, position, direction, color = 0x000000, options = {}) {
+    const length = Number(options.length ?? 0.24);
+    const radius = Number(options.radius ?? 0.045);
+
     const cone = new THREE.Mesh(
-      new THREE.ConeGeometry(size * 0.42, size, 24),
+      new THREE.ConeGeometry(radius, length, 32),
       new THREE.MeshBasicMaterial({ color })
     );
 
     const dir = direction.clone().normalize();
     cone.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-    cone.position.copy(position.clone().add(dir.clone().multiplyScalar(size * 0.45)));
+    cone.position.copy(position.clone().add(dir.clone().multiplyScalar(length * 0.45)));
 
     return cone;
   }
@@ -1076,6 +1067,8 @@
     controls.target.set(0, 0, 0);
     controls.update();
 
+    const labelDistanceReference = camera.position.distanceTo(controls.target);
+
     const ex = extent(rows.map(r => r.x));
     const ey = extent(rows.map(r => r.y));
     const ez = extent(rows.map(r => r.z));
@@ -1132,15 +1125,33 @@
     scene.add(makeLine(THREE, o, yEnd, axisColor));
     scene.add(makeLine(THREE, o, zEnd, axisColor));
 
-    scene.add(makeArrowHead(THREE, xEnd, new THREE.Vector3(1, 0, 0), axisColor, 0.30));
-    scene.add(makeArrowHead(THREE, yEnd, new THREE.Vector3(0, 1, 0), axisColor, 0.30));
-    scene.add(makeArrowHead(THREE, zEnd, new THREE.Vector3(0, 0, 1), axisColor, 0.30));
+    const arrowLength = options.arrowHeadLength ?? 0.24;
+    const arrowRadius = options.arrowHeadRadius ?? 0.045;
+
+    scene.add(makeArrowHead(THREE, xEnd, new THREE.Vector3(1, 0, 0), axisColor, {
+      length: arrowLength,
+      radius: arrowRadius
+    }));
+
+    scene.add(makeArrowHead(THREE, yEnd, new THREE.Vector3(0, 1, 0), axisColor, {
+      length: arrowLength,
+      radius: arrowRadius
+    }));
+
+    scene.add(makeArrowHead(THREE, zEnd, new THREE.Vector3(0, 0, 1), axisColor, {
+      length: arrowLength,
+      radius: arrowRadius
+    }));
 
     const htmlLabels = [];
 
     htmlLabels.push(makeHTMLLabel(container, options.xLabelLatex || xField, {
       world: new THREE.Vector3(axisLen + 0.42, 0, 0),
-      fontSize: options.axisLabelFontSize ?? 18,
+      fontSize: options.axisLabelFontSize ?? 16,
+      minFontSize: options.axisLabelMinFontSize ?? 9,
+      maxFontSize: options.axisLabelMaxFontSize ?? 16,
+      perspectiveScale: options.axisLabelPerspectiveScale === true,
+      distanceReference: labelDistanceReference,
       fontWeight: "700",
       fontStyle: "italic",
       useKatex: options.useKatex !== false
@@ -1148,7 +1159,11 @@
 
     htmlLabels.push(makeHTMLLabel(container, options.yLabelLatex || yField, {
       world: new THREE.Vector3(0, axisLen + 0.42, 0),
-      fontSize: options.axisLabelFontSize ?? 18,
+      fontSize: options.axisLabelFontSize ?? 16,
+      minFontSize: options.axisLabelMinFontSize ?? 9,
+      maxFontSize: options.axisLabelMaxFontSize ?? 16,
+      perspectiveScale: options.axisLabelPerspectiveScale === true,
+      distanceReference: labelDistanceReference,
       fontWeight: "700",
       fontStyle: "italic",
       useKatex: options.useKatex !== false
@@ -1156,7 +1171,11 @@
 
     htmlLabels.push(makeHTMLLabel(container, options.zLabelLatex || zField, {
       world: new THREE.Vector3(0, 0, axisLen + 0.42),
-      fontSize: options.axisLabelFontSize ?? 18,
+      fontSize: options.axisLabelFontSize ?? 16,
+      minFontSize: options.axisLabelMinFontSize ?? 9,
+      maxFontSize: options.axisLabelMaxFontSize ?? 16,
+      perspectiveScale: options.axisLabelPerspectiveScale === true,
+      distanceReference: labelDistanceReference,
       fontWeight: "700",
       fontStyle: "italic",
       useKatex: options.useKatex !== false
@@ -1194,7 +1213,11 @@
 
         htmlLabels.push(makeHTMLLabel(container, latex, {
           world: pos,
-          fontSize: options.tickFontSize ?? 10,
+          fontSize: options.tickFontSize ?? 8,
+          minFontSize: options.tickMinFontSize ?? 5,
+          maxFontSize: options.tickMaxFontSize ?? 8,
+          perspectiveScale: options.tickLabelPerspectiveScale !== false,
+          distanceReference: labelDistanceReference,
           fontWeight: "400",
           fontStyle: "normal",
           textShadow: "0 0 2px rgba(255,255,255,0.95)",
