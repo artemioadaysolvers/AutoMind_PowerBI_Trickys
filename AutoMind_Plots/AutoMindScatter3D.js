@@ -1,20 +1,19 @@
 /*!
  * AutoMindScatter3D.js
- * v1.0.16 - Real KaTeX LaTeX Axis Labels + Bigger Logo + More Axis Ticks
+ * v1.0.17 - Fix bare module specifier "three" + Real KaTeX LaTeX Labels
  *
  * Correcciones:
+ * - Arregla error:
+ *   Failed to resolve module specifier "three".
+ * - NO usa OrbitControls directo desde unpkg sin resolver dependencias.
+ * - Carga Three.js y OrbitControls desde esm.sh con bundle.
+ * - Incluye fallback que parchea OrbitControls.js reemplazando `from "three"` por una URL blob.
  * - Renderizado real de LaTeX con KaTeX para labels de ejes y ticks.
  * - Fallback HTML si KaTeX no carga.
- * - Repara strings mal escritos como "\mathrm{z}" en JS, donde JS convierte \r en carriage return.
- * - Soporta labels escritos como:
- *      String.raw`\mathrm{z}`
- *      "\\mathrm{z}"
- *      "\mathrm{z}"   // también intenta repararlo
  * - Logo AutoMind más grande por defecto.
  * - Más medidas/ticks en los ejes.
  * - Se eliminan los ticks con valor 0.
  * - El badge muestra solamente la imagen.
- * - No muestra textos tipo "resolviendo sha actual del main...".
  *
  * Funciones globales:
  *   window.renderAutoMindScatter3D(options)
@@ -25,10 +24,43 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.0.16-KATEX_LATEX_LABELS";
+  const VERSION = "1.0.17-FIX_THREE_BARE_MODULE_KATEX";
 
-  const THREE_URL = "https://unpkg.com/three@0.160.0/build/three.module.js";
-  const ORBIT_URL = "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
+  /*
+    NO usar esto:
+      https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js
+
+    porque ese archivo importa:
+      from "three"
+
+    y Power BI / navegador no puede resolver "three" como bare module.
+  */
+
+  const THREE_VERSION = "0.160.0";
+
+  const THREE_ESM_URLS = [
+    {
+      name: "esm.sh bundle",
+      three: `https://esm.sh/three@${THREE_VERSION}?bundle&target=es2020`,
+      orbit: `https://esm.sh/three@${THREE_VERSION}/examples/jsm/controls/OrbitControls.js?bundle&target=es2020`
+    },
+    {
+      name: "esm.sh bundle deps",
+      three: `https://esm.sh/three@${THREE_VERSION}?bundle&target=es2020`,
+      orbit: `https://esm.sh/three@${THREE_VERSION}/examples/jsm/controls/OrbitControls.js?deps=three@${THREE_VERSION}&bundle&target=es2020`
+    },
+    {
+      name: "esm.run",
+      three: `https://esm.run/three@${THREE_VERSION}`,
+      orbit: `https://esm.run/three@${THREE_VERSION}/examples/jsm/controls/OrbitControls.js`
+    }
+  ];
+
+  const THREE_UNPKG_MODULE_URL =
+    `https://unpkg.com/three@${THREE_VERSION}/build/three.module.js`;
+
+  const ORBIT_UNPKG_MODULE_URL =
+    `https://unpkg.com/three@${THREE_VERSION}/examples/jsm/controls/OrbitControls.js`;
 
   const KATEX_CSS_URL = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css";
   const KATEX_JS_URL = "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js";
@@ -59,13 +91,112 @@
     return containerOrId;
   }
 
+  function dynamicImport(url) {
+    return import(/* webpackIgnore: true */ url);
+  }
+
+  async function loadText(url) {
+    const res = await fetch(url, { cache: "no-cache" });
+    if (!res.ok) {
+      throw new Error("No se pudo cargar " + url + " | status=" + res.status);
+    }
+    return await res.text();
+  }
+
+  async function loadThreeFromBundles() {
+    let lastError = null;
+
+    for (const candidate of THREE_ESM_URLS) {
+      try {
+        const THREE = await dynamicImport(candidate.three);
+        const orbitMod = await dynamicImport(candidate.orbit);
+
+        if (!THREE || !orbitMod || !orbitMod.OrbitControls) {
+          throw new Error("Carga incompleta de Three/OrbitControls desde " + candidate.name);
+        }
+
+        return {
+          THREE,
+          OrbitControls: orbitMod.OrbitControls,
+          source: candidate.name
+        };
+      } catch (err) {
+        lastError = err;
+      }
+    }
+
+    throw lastError || new Error("No se pudo cargar Three.js desde bundles ESM.");
+  }
+
+  async function loadThreeFromPatchedUnpkg() {
+    /*
+      Fallback robusto:
+      - Descarga three.module.js.
+      - Lo convierte a blob URL.
+      - Descarga OrbitControls.js.
+      - Reemplaza:
+            from 'three'
+            from "three"
+        por:
+            from '<threeBlobUrl>'
+      - Importa OrbitControls ya parcheado.
+
+      Esto elimina completamente el error:
+        Failed to resolve module specifier "three".
+    */
+
+    const threeCode = await loadText(THREE_UNPKG_MODULE_URL);
+    const threeBlobUrl = URL.createObjectURL(
+      new Blob([threeCode], { type: "text/javascript" })
+    );
+
+    const THREE = await dynamicImport(threeBlobUrl);
+
+    let orbitCode = await loadText(ORBIT_UNPKG_MODULE_URL);
+
+    orbitCode = orbitCode
+      .replace(/from\s+['"]three['"]/g, `from "${threeBlobUrl}"`)
+      .replace(/from\s+['"]three\/build\/three\.module\.js['"]/g, `from "${threeBlobUrl}"`);
+
+    const orbitBlobUrl = URL.createObjectURL(
+      new Blob([orbitCode], { type: "text/javascript" })
+    );
+
+    const orbitMod = await dynamicImport(orbitBlobUrl);
+
+    if (!THREE || !orbitMod || !orbitMod.OrbitControls) {
+      throw new Error("Fallback parcheado cargó, pero OrbitControls no está disponible.");
+    }
+
+    return {
+      THREE,
+      OrbitControls: orbitMod.OrbitControls,
+      source: "patched-unpkg-blob"
+    };
+  }
+
   async function loadThree() {
     if (loaderPromise) return loaderPromise;
 
     loaderPromise = (async function () {
-      const THREE = await import(THREE_URL);
-      const mod = await import(ORBIT_URL);
-      return { THREE, OrbitControls: mod.OrbitControls };
+      let bundleError = null;
+
+      try {
+        return await loadThreeFromBundles();
+      } catch (err) {
+        bundleError = err;
+      }
+
+      try {
+        return await loadThreeFromPatchedUnpkg();
+      } catch (fallbackError) {
+        const msg =
+          "No se pudo cargar Three.js/OrbitControls. " +
+          "Error bundle: " + String(bundleError && bundleError.message ? bundleError.message : bundleError) +
+          " | Error fallback: " + String(fallbackError && fallbackError.message ? fallbackError.message : fallbackError);
+
+        throw new Error(msg);
+      }
     })();
 
     return loaderPromise;
@@ -192,20 +323,13 @@
     if (!s) return "";
 
     /*
-      IMPORTANTE:
       Si escribes esto en JS:
           "\mathrm{z}"
       JS interpreta "\r" como carriage return.
       Entonces realmente queda:
           "\r" + "mathrm{z}"
 
-      También pasa con:
-        "\theta" -> tab + "heta"
-        "\frac"  -> form feed + "rac"
-        "\beta"  -> backspace + "eta"
-        "\nabla" -> newline + "abla"
-
-      Esta sección repara esos casos comunes.
+      Esta sección repara casos comunes.
     */
     s = s
       .replace(/\r\s*mathrm/g, "\\mathrm")
@@ -226,11 +350,6 @@
 
       .replace(/\v\s*ar/g, "\\var");
 
-    /*
-      Si escribiste "\alpha" en JS, como "\a" no es escape válido,
-      muchas veces queda como "alpha" sin backslash.
-      Aquí agregamos backslash a comandos LaTeX conocidos escritos sin "\".
-    */
     const bareCommands = [
       "mathrm",
       "text",
@@ -394,12 +513,7 @@
       guard++;
 
       let found = findTwoCommandArgs(s, "\\frac");
-      let commandLen = "\\frac".length;
-
-      if (!found) {
-        found = findTwoCommandArgs(s, "frac");
-        commandLen = "frac".length;
-      }
+      if (!found) found = findTwoCommandArgs(s, "frac");
 
       if (!found) break;
 
@@ -413,8 +527,6 @@
         `</span>`;
 
       s = s.slice(0, found.start) + replacement + s.slice(found.end);
-
-      if (commandLen <= 0) break;
     }
 
     return s;
@@ -908,7 +1020,9 @@
       container.style.height = "500px";
     }
 
-    const { THREE, OrbitControls } = await loadThree();
+    const loaded = await loadThree();
+    const THREE = loaded.THREE;
+    const OrbitControls = loaded.OrbitControls;
 
     const xField = options.xField || "x";
     const yField = options.yField || "y";
@@ -943,7 +1057,12 @@
     const camera = new THREE.PerspectiveCamera(75, w / h, 0.1, 1000);
     camera.position.set(...(options.cameraPosition || [7, 7, 7]));
 
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      alpha: false,
+      preserveDrawingBuffer: false
+    });
+
     renderer.setSize(w, h);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.domElement.style.width = "100%";
@@ -953,6 +1072,7 @@
 
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = options.enableDamping !== false;
+    controls.dampingFactor = options.dampingFactor ?? 0.08;
     controls.target.set(0, 0, 0);
     controls.update();
 
@@ -1119,6 +1239,7 @@
 
     const handle = {
       version: VERSION,
+      source: loaded.source,
       scene,
       camera,
       renderer,
@@ -1152,7 +1273,8 @@
     destroy: destroyAutoMindScatter3D,
     parseCsv,
     latexToHTML,
-    normalizeLatexInput
+    normalizeLatexInput,
+    loadThree
   };
 
   window.renderAutoMindScatter3D = renderAutoMindScatter3D;
