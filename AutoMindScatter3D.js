@@ -1,13 +1,15 @@
 /*!
  * AutoMindScatter3D.js
- * v1.0.14 - HTML LaTeX Axis Labels Fix
+ * v1.0.15 - Bigger Logo + More Axis Ticks + Robust LaTeX Axis Labels
  *
  * Correcciones:
- * - Los labels de ejes ya no se dibujan como sprites 3D borrosos/gigantes.
- * - Los nombres de ejes se renderizan como HTML estilo LaTeX, sobrepuesto y nítido.
- * - \mathrm{z} se ve como z, no como texto literal.
+ * - Logo AutoMind más grande por defecto.
+ * - Más medidas/ticks en los ejes.
+ * - Los labels de ejes se renderizan como HTML estilo LaTeX, sobrepuesto y nítido.
+ * - Soporta \mathrm{z} y también mathrm{z} cuando JS elimina el backslash por escribir "\mathrm{z}".
  * - Se eliminan los ticks con valor 0.
  * - El badge muestra solamente la imagen, sin texto AutoMindCloud duplicado.
+ * - No muestra textos tipo "resolviendo sha actual del main...".
  *
  * Funciones globales:
  *   window.renderAutoMindScatter3D(options)
@@ -18,7 +20,7 @@
 (function () {
   "use strict";
 
-  const VERSION = "1.0.14-HTML_LATEX_AXIS_FIX";
+  const VERSION = "1.0.15-BIGGER_LOGO_MORE_AXIS_TICKS";
 
   const THREE_URL = "https://unpkg.com/three@0.160.0/build/three.module.js";
   const ORBIT_URL = "https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js";
@@ -27,11 +29,11 @@
     "https://raw.githubusercontent.com/artemioadaysolvers/AutoMindCloudExperimental/main/AutoMindCloud/AutoMindCloud2.png";
 
   const PALETTE = [
-    [0.90, 0.10, 0.25], // rojo
-    [0.10, 0.30, 0.95], // azul
-    [0.10, 0.65, 0.25], // verde
-    [0.95, 0.45, 0.10], // naranjo
-    [0.55, 0.10, 0.75], // morado
+    [0.90, 0.10, 0.25],
+    [0.10, 0.30, 0.95],
+    [0.10, 0.65, 0.25],
+    [0.95, 0.45, 0.10],
+    [0.55, 0.10, 0.75],
     [0.00, 0.65, 0.75],
     [0.90, 0.20, 0.80],
     [0.55, 0.75, 0.05],
@@ -124,6 +126,7 @@
 
     while (s.includes(command) && guard < 100) {
       guard++;
+
       const found = findCommandArg(s, command);
       if (!found) break;
 
@@ -135,23 +138,30 @@
     return s;
   }
 
+  function replaceCommandVariantsWithSpan(s, commandName, style) {
+    /*
+      Soporta:
+        "\\mathrm{z}"  -> correcto en JS si escribes "\\mathrm{z}" o String.raw`\mathrm{z}`
+        "mathrm{z}"   -> pasa cuando escribes "\mathrm{z}" y JS se come el backslash
+    */
+    s = replaceCommandWithSpan(s, "\\" + commandName, style);
+    s = replaceCommandWithSpan(s, commandName, style);
+    return s;
+  }
+
   function replaceScriptsWithHTML(s) {
-    // Subíndices con llaves: x_{t}
     s = s.replace(/_\{([^{}]+)\}/g, function (_, a) {
       return `<sub>${latexToHTML(a)}</sub>`;
     });
 
-    // Superíndices con llaves: x^{2}
     s = s.replace(/\^\{([^{}]+)\}/g, function (_, a) {
       return `<sup>${latexToHTML(a)}</sup>`;
     });
 
-    // Subíndices simples: x_t
     s = s.replace(/_([A-Za-z0-9+\-]+)/g, function (_, a) {
       return `<sub>${htmlEscape(a)}</sub>`;
     });
 
-    // Superíndices simples: x^2
     s = s.replace(/\^([A-Za-z0-9+\-]+)/g, function (_, a) {
       return `<sup>${htmlEscape(a)}</sup>`;
     });
@@ -163,10 +173,8 @@
     let s = stripMathDelimiters(input);
     if (!s) return "";
 
-    // Primero escapamos HTML normal.
     s = htmlEscape(s);
 
-    // Revertir escapes necesarios de LaTeX para poder detectar comandos.
     s = s
       .replace(/\\_/g, "_")
       .replace(/\\%/g, "%")
@@ -176,42 +184,65 @@
       .replace(/\\\{/g, "{")
       .replace(/\\\}/g, "}");
 
-    // Comandos con argumentos.
-    s = replaceCommandWithSpan(s, "\\mathrm", "font-style:normal;font-weight:400;");
-    s = replaceCommandWithSpan(s, "\\text", "font-style:normal;font-weight:400;");
-    s = replaceCommandWithSpan(s, "\\operatorname", "font-style:normal;font-weight:400;");
-    s = replaceCommandWithSpan(s, "\\mathbf", "font-style:normal;font-weight:700;");
-    s = replaceCommandWithSpan(s, "\\boldsymbol", "font-style:italic;font-weight:700;");
-    s = replaceCommandWithSpan(s, "\\mathit", "font-style:italic;font-weight:400;");
-    s = replaceCommandWithSpan(s, "\\mathsf", "font-style:normal;font-weight:400;");
+    s = replaceCommandVariantsWithSpan(s, "mathrm", "font-style:normal;font-weight:400;");
+    s = replaceCommandVariantsWithSpan(s, "text", "font-style:normal;font-weight:400;");
+    s = replaceCommandVariantsWithSpan(s, "operatorname", "font-style:normal;font-weight:400;");
+    s = replaceCommandVariantsWithSpan(s, "mathbf", "font-style:normal;font-weight:700;");
+    s = replaceCommandVariantsWithSpan(s, "boldsymbol", "font-style:italic;font-weight:700;");
+    s = replaceCommandVariantsWithSpan(s, "mathit", "font-style:italic;font-weight:400;");
+    s = replaceCommandVariantsWithSpan(s, "mathsf", "font-style:normal;font-weight:400;");
 
-    // Símbolos comunes.
     const replacements = [
       ["\\times", "×"],
+      ["times", "×"],
       ["\\cdot", "·"],
+      ["cdot", "·"],
       ["\\pm", "±"],
+      ["pm", "±"],
       ["\\mp", "∓"],
+      ["mp", "∓"],
       ["\\leq", "≤"],
+      ["leq", "≤"],
       ["\\geq", "≥"],
+      ["geq", "≥"],
       ["\\neq", "≠"],
+      ["neq", "≠"],
       ["\\approx", "≈"],
+      ["approx", "≈"],
       ["\\infty", "∞"],
+      ["infty", "∞"],
       ["\\alpha", "α"],
+      ["alpha", "α"],
       ["\\beta", "β"],
+      ["beta", "β"],
       ["\\gamma", "γ"],
+      ["gamma", "γ"],
       ["\\delta", "δ"],
+      ["delta", "δ"],
       ["\\epsilon", "ε"],
+      ["epsilon", "ε"],
       ["\\theta", "θ"],
+      ["theta", "θ"],
       ["\\lambda", "λ"],
+      ["lambda", "λ"],
       ["\\mu", "μ"],
+      ["mu", "μ"],
       ["\\pi", "π"],
+      ["pi", "π"],
       ["\\rho", "ρ"],
+      ["rho", "ρ"],
       ["\\sigma", "σ"],
+      ["sigma", "σ"],
       ["\\phi", "φ"],
+      ["phi", "φ"],
       ["\\omega", "ω"],
+      ["omega", "ω"],
       ["\\Delta", "Δ"],
+      ["Delta", "Δ"],
       ["\\Sigma", "Σ"],
-      ["\\Omega", "Ω"]
+      ["Sigma", "Σ"],
+      ["\\Omega", "Ω"],
+      ["Omega", "Ω"]
     ];
 
     for (const [from, to] of replacements) {
@@ -220,10 +251,7 @@
 
     s = replaceScriptsWithHTML(s);
 
-    // Si queda un comando desconocido, remover solo el slash para no mostrar \literal.
     s = s.replace(/\\([A-Za-z]+)/g, "$1");
-
-    // Quitar llaves sueltas.
     s = s.replace(/[{}]/g, "");
 
     return s;
@@ -250,6 +278,18 @@
     div.style.whiteSpace = "nowrap";
     div.style.textShadow = options.textShadow || "0 0 1px rgba(255,255,255,0.95)";
     div.style.userSelect = "none";
+
+    const supSubCss = "line-height:0;position:relative;vertical-align:baseline;";
+    const subCss = supSubCss + "bottom:-0.25em;font-size:70%;";
+    const supCss = supSubCss + "top:-0.45em;font-size:70%;";
+
+    for (const sub of div.querySelectorAll("sub")) {
+      sub.setAttribute("style", subCss);
+    }
+
+    for (const sup of div.querySelectorAll("sup")) {
+      sup.setAttribute("style", supCss);
+    }
 
     container.appendChild(div);
 
@@ -347,7 +387,7 @@
     return { min, max, range: max - min };
   }
 
-  function niceTicks(min, max, n = 4) {
+  function niceTicks(min, max, n = 7, maxLabels = 12) {
     if (!Number.isFinite(min) || !Number.isFinite(max) || min === max) return [];
 
     const raw = (max - min) / Math.max(1, n - 1);
@@ -357,6 +397,7 @@
     let step;
     if (base <= 1) step = 1 * pow;
     else if (base <= 2) step = 2 * pow;
+    else if (base <= 2.5) step = 2.5 * pow;
     else if (base <= 5) step = 5 * pow;
     else step = 10 * pow;
 
@@ -366,10 +407,10 @@
     const arr = [];
     for (let v = start; v <= end + step * 0.25; v += step) {
       const val = Math.abs(v) < step * 1e-8 ? 0 : v;
-      if (Math.abs(val) > step * 1e-8) arr.push(val); // saca los 0
+      if (Math.abs(val) > step * 1e-8) arr.push(val);
     }
 
-    return arr.slice(0, 6);
+    return arr.slice(0, maxLabels);
   }
 
   function formatTickLatex(v) {
@@ -377,6 +418,11 @@
     if (!Number.isFinite(n) || Math.abs(n) < 1e-12) return "";
 
     const a = Math.abs(n);
+
+    if (a >= 1e9) {
+      const coeff = (n / 1e9).toFixed(1).replace(/\.0$/, "");
+      return coeff + "\\times 10^{9}";
+    }
 
     if (a >= 1e6) {
       const coeff = (n / 1e6).toFixed(1).replace(/\.0$/, "");
@@ -454,8 +500,8 @@
     const badge = document.createElement("div");
     badge.className = "automind-3d-badge-image-only";
     badge.style.position = "absolute";
-    badge.style.right = (options.badgeRight ?? 12) + "px";
-    badge.style.bottom = (options.badgeBottom ?? 12) + "px";
+    badge.style.right = (options.badgeRight ?? 16) + "px";
+    badge.style.bottom = (options.badgeBottom ?? 16) + "px";
     badge.style.zIndex = "10";
     badge.style.display = "flex";
     badge.style.alignItems = "center";
@@ -465,14 +511,12 @@
     const img = document.createElement("img");
     img.src = options.logoUrl || DEFAULT_LOGO_URL;
     img.alt = "AutoMindCloud";
-    img.style.width = (options.badgeSize ?? 64) + "px";
-    img.style.height = (options.badgeSize ?? 64) + "px";
+    img.style.width = (options.badgeSize ?? 112) + "px";
+    img.style.height = (options.badgeSize ?? 112) + "px";
     img.style.objectFit = "contain";
-    img.style.opacity = "0.92";
+    img.style.opacity = String(options.badgeOpacity ?? 0.95);
 
     badge.appendChild(img);
-
-    // No se agrega texto. Solo imagen.
     container.appendChild(badge);
   }
 
@@ -507,9 +551,17 @@
     container.style.overflow = "hidden";
     container.style.background = options.background || "#ffffff";
 
-    if (options.width) container.style.width = typeof options.width === "number" ? options.width + "px" : String(options.width);
-    if (options.height) container.style.height = typeof options.height === "number" ? options.height + "px" : String(options.height);
-    if (!container.style.height && container.clientHeight < 10) container.style.height = "500px";
+    if (options.width) {
+      container.style.width = typeof options.width === "number" ? options.width + "px" : String(options.width);
+    }
+
+    if (options.height) {
+      container.style.height = typeof options.height === "number" ? options.height + "px" : String(options.height);
+    }
+
+    if (!container.style.height && container.clientHeight < 10) {
+      container.style.height = "500px";
+    }
 
     const { THREE, OrbitControls } = await loadThree();
 
@@ -551,6 +603,7 @@
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.domElement.style.width = "100%";
     renderer.domElement.style.height = "100%";
+    renderer.domElement.style.display = "block";
     container.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -575,7 +628,6 @@
       return new THREE.Vector3(x * scale, y * scale, z * scale);
     }
 
-    // ---------- PUNTOS ----------
     const positions = [];
     const colors = [];
     const catMap = new Map();
@@ -604,7 +656,6 @@
 
     scene.add(new THREE.Points(geometry, material));
 
-    // ---------- EJES NEGROS ----------
     const axisColor = 0x000000;
     const o = new THREE.Vector3(0, 0, 0);
 
@@ -620,39 +671,32 @@
     scene.add(makeArrowHead(THREE, yEnd, new THREE.Vector3(0, 1, 0), axisColor, 0.30));
     scene.add(makeArrowHead(THREE, zEnd, new THREE.Vector3(0, 0, 1), axisColor, 0.30));
 
-    // ---------- LABELS HTML NÍTIDOS ----------
     const htmlLabels = [];
 
     htmlLabels.push(makeHTMLLabel(container, options.xLabelLatex || xField, {
       world: new THREE.Vector3(axisLen + 0.42, 0, 0),
       fontSize: options.axisLabelFontSize ?? 18,
       fontWeight: "700",
-      fontStyle: "italic",
-      xOffset: 0,
-      yOffset: 0
+      fontStyle: "italic"
     }));
 
     htmlLabels.push(makeHTMLLabel(container, options.yLabelLatex || yField, {
       world: new THREE.Vector3(0, axisLen + 0.42, 0),
       fontSize: options.axisLabelFontSize ?? 18,
       fontWeight: "700",
-      fontStyle: "italic",
-      xOffset: 0,
-      yOffset: 0
+      fontStyle: "italic"
     }));
 
     htmlLabels.push(makeHTMLLabel(container, options.zLabelLatex || zField, {
       world: new THREE.Vector3(0, 0, axisLen + 0.42),
       fontSize: options.axisLabelFontSize ?? 18,
       fontWeight: "700",
-      fontStyle: "italic",
-      xOffset: 0,
-      yOffset: 0
+      fontStyle: "italic"
     }));
 
-    // ---------- TICKS SIN CEROS ----------
-    const tickCount = options.tickCount ?? 4;
-    const tickSize = 0.07;
+    const tickCount = options.tickCount ?? 7;
+    const maxTickLabels = options.maxTickLabels ?? 12;
+    const tickSize = options.tickSize ?? 0.07;
 
     function addTicks(axis, ticks) {
       for (const t of ticks) {
@@ -690,17 +734,17 @@
       }
     }
 
-    // Medidas positivas tipo ejemplo, sin el 0.
-    addTicks("x", niceTicks(0, Math.max(ex.max, 0), tickCount));
-    addTicks("y", niceTicks(0, Math.max(ey.max, 0), tickCount));
-    addTicks("z", niceTicks(0, Math.max(ez.max, 0), tickCount));
+    addTicks("x", niceTicks(0, Math.max(ex.max, 0), tickCount, maxTickLabels));
+    addTicks("y", niceTicks(0, Math.max(ey.max, 0), tickCount, maxTickLabels));
+    addTicks("z", niceTicks(0, Math.max(ez.max, 0), tickCount, maxTickLabels));
 
     addBadge(container, {
       showBadge: options.showBadge,
       logoUrl: options.logoUrl,
-      badgeSize: options.badgeSize ?? 64,
-      badgeRight: options.badgeRight ?? 12,
-      badgeBottom: options.badgeBottom ?? 12
+      badgeSize: options.badgeSize ?? 112,
+      badgeOpacity: options.badgeOpacity ?? 0.95,
+      badgeRight: options.badgeRight ?? 16,
+      badgeBottom: options.badgeBottom ?? 16
     });
 
     const resizeObserver = new ResizeObserver(() => {
@@ -710,6 +754,7 @@
       camera.updateProjectionMatrix();
       renderer.setSize(nw, nh);
     });
+
     resizeObserver.observe(container);
 
     let raf = 0;
