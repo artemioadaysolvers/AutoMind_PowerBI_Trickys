@@ -1,23 +1,22 @@
 /*!
  * AutoMindHistogram3D.js
- * v1.0.0
+ * v1.0.1 - Discretization Grid
  *
  * Histograma 3D interactivo con Three.js.
+ *
+ * Cambios v1.0.1:
+ * - El grid ahora usa exactamente la discretización del dominio del histograma.
+ * - Si usas bins: 32, el grid tendrá 32 x 32 celdas.
+ * - Si usas xBins/yBins, el grid respeta esos bins por eje.
+ * - Si pasas bars precomputadas, se generan xEdges/zEdges desde xBinWidth/zBinWidth.
+ * - Corrección de opacidad: opacity < 1 ahora activa transparent correctamente.
+ * - Limpieza del listener wheel al destruir el visor.
  *
  * Funciones globales:
  *   window.renderAutoMindHistogram3D(options)
  *   window.destroyAutoMindHistogram3D(containerOrId)
  *
- * Uso básico:
- *   renderAutoMindHistogram3D({
- *     containerId: "viewer",
- *     bars: [
- *       { x: 0.1, z: 0.2, h: 12 },
- *       { x: 0.3, z: 0.5, h: 30 }
- *     ]
- *   });
- *
- * También acepta datos crudos:
+ * Uso con datos crudos:
  *   renderAutoMindHistogram3D({
  *     containerId: "viewer",
  *     data: [{ x: 1, y: 2 }, { x: 2, y: 3 }],
@@ -25,12 +24,23 @@
  *     yField: "y",
  *     bins: 32
  *   });
+ *
+ * Uso con barras ya calculadas:
+ *   renderAutoMindHistogram3D({
+ *     containerId: "viewer",
+ *     bars: [
+ *       { x: 0.1, z: 0.2, h: 12 },
+ *       { x: 0.3, z: 0.5, h: 30 }
+ *     ],
+ *     xBinWidth: 0.1,
+ *     zBinWidth: 0.1
+ *   });
  */
 
 (function () {
   "use strict";
 
-  const VERSION = "1.0.0";
+  const VERSION = "1.0.1-DISCRETIZATION_GRID";
 
   const THREE_VERSION = "0.160.0";
 
@@ -151,6 +161,27 @@
     return edges;
   }
 
+  function normalizeEdges(edges, fallback = null) {
+    if (!Array.isArray(edges) || edges.length < 2) return fallback;
+
+    const out = edges
+      .map(v => toNumber(v))
+      .filter(v => Number.isFinite(v));
+
+    if (out.length < 2) return fallback;
+
+    out.sort((a, b) => a - b);
+
+    const unique = [];
+    for (const v of out) {
+      if (!unique.length || Math.abs(v - unique[unique.length - 1]) > 1e-12) {
+        unique.push(v);
+      }
+    }
+
+    return unique.length >= 2 ? unique : fallback;
+  }
+
   function findBin(value, edges) {
     const n = edges.length - 1;
 
@@ -192,10 +223,17 @@
 
     const bins = options.bins ?? 32;
     const xBins = options.xBins ?? bins;
-    const yBins = options.yBins ?? bins;
+    const yBins = options.yBins ?? options.zBins ?? bins;
 
-    const xEdges = options.xEdges || makeEdges(ex.min, ex.max, xBins);
-    const yEdges = options.yEdges || makeEdges(ey.min, ey.max, yBins);
+    const xEdges = normalizeEdges(
+      options.xEdges,
+      makeEdges(ex.min, ex.max, xBins)
+    );
+
+    const yEdges = normalizeEdges(
+      options.yEdges || options.zEdges,
+      makeEdges(ey.min, ey.max, yBins)
+    );
 
     const counts = Array.from({ length: xEdges.length - 1 }, () =>
       Array.from({ length: yEdges.length - 1 }, () => 0)
@@ -228,12 +266,21 @@
 
     return {
       bars,
+
+      xEdges,
+      zEdges: yEdges,
+
       xMin: xEdges[0],
       xMax: xEdges[xEdges.length - 1],
       zMin: yEdges[0],
       zMax: yEdges[yEdges.length - 1],
+
       xBinWidth: xEdges[1] - xEdges[0],
       zBinWidth: yEdges[1] - yEdges[0],
+
+      xBins: xEdges.length - 1,
+      zBins: yEdges.length - 1,
+
       hMax: Math.max(...bars.map(b => b.h), 1)
     };
   }
@@ -269,24 +316,53 @@
       const ez = extent(bars.map(b => b.z));
       const eh = extent(bars.map(b => b.h));
 
+      const approxBins = Math.max(1, Math.round(Math.sqrt(bars.length)));
+
       const xBinWidth =
         Number.isFinite(toNumber(options.xBinWidth))
           ? toNumber(options.xBinWidth)
-          : ex.range / Math.max(1, Math.sqrt(bars.length));
+          : ex.range / approxBins;
 
       const zBinWidth =
         Number.isFinite(toNumber(options.zBinWidth))
           ? toNumber(options.zBinWidth)
-          : ez.range / Math.max(1, Math.sqrt(bars.length));
+          : ez.range / approxBins;
+
+      const xMin = toNumber(options.xMin, ex.min - xBinWidth / 2);
+      const xMax = toNumber(options.xMax, ex.max + xBinWidth / 2);
+      const zMin = toNumber(options.zMin, ez.min - zBinWidth / 2);
+      const zMax = toNumber(options.zMax, ez.max + zBinWidth / 2);
+
+      const xBins = Math.max(1, Math.round((xMax - xMin) / xBinWidth));
+      const zBins = Math.max(1, Math.round((zMax - zMin) / zBinWidth));
+
+      const xEdges = normalizeEdges(
+        options.xEdges,
+        makeEdges(xMin, xMax, xBins)
+      );
+
+      const zEdges = normalizeEdges(
+        options.zEdges || options.yEdges,
+        makeEdges(zMin, zMax, zBins)
+      );
 
       return {
         bars,
-        xMin: toNumber(options.xMin, ex.min),
-        xMax: toNumber(options.xMax, ex.max),
-        zMin: toNumber(options.zMin, ez.min),
-        zMax: toNumber(options.zMax, ez.max),
-        xBinWidth,
-        zBinWidth,
+
+        xEdges,
+        zEdges,
+
+        xMin: xEdges[0],
+        xMax: xEdges[xEdges.length - 1],
+        zMin: zEdges[0],
+        zMax: zEdges[zEdges.length - 1],
+
+        xBinWidth: xEdges[1] - xEdges[0],
+        zBinWidth: zEdges[1] - zEdges[0],
+
+        xBins: xEdges.length - 1,
+        zBins: zEdges.length - 1,
+
         hMax: toNumber(options.hMax, eh.max)
       };
     }
@@ -300,10 +376,56 @@
     }
   }
 
-  function makeLine(THREE, a, b, color = 0x111111) {
+  function makeLine(THREE, a, b, color = 0x111111, opacity = 1) {
     const geometry = new THREE.BufferGeometry().setFromPoints([a, b]);
-    const material = new THREE.LineBasicMaterial({ color });
+    const material = new THREE.LineBasicMaterial({
+      color,
+      transparent: opacity < 1,
+      opacity
+    });
     return new THREE.Line(geometry, material);
+  }
+
+  function makeDiscretizationGrid(THREE, scene, hist, scaleX, scaleZ, axisSize, options = {}) {
+    const y = options.gridY ?? 0.001;
+    const color = options.gridColor ?? 0xd0d0d0;
+    const strongColor = options.gridStrongColor ?? 0xa8a8a8;
+    const opacity = options.gridOpacity ?? 1;
+
+    const xEdges = hist.xEdges || makeEdges(hist.xMin, hist.xMax, hist.xBins || 10);
+    const zEdges = hist.zEdges || makeEdges(hist.zMin, hist.zMax, hist.zBins || 10);
+
+    const half = axisSize / 2;
+
+    for (let i = 0; i < xEdges.length; i++) {
+      const sx = scaleX(xEdges[i]);
+      const isBorder = i === 0 || i === xEdges.length - 1;
+
+      scene.add(
+        makeLine(
+          THREE,
+          new THREE.Vector3(sx, y, -half),
+          new THREE.Vector3(sx, y, half),
+          isBorder ? strongColor : color,
+          opacity
+        )
+      );
+    }
+
+    for (let j = 0; j < zEdges.length; j++) {
+      const sz = scaleZ(zEdges[j]);
+      const isBorder = j === 0 || j === zEdges.length - 1;
+
+      scene.add(
+        makeLine(
+          THREE,
+          new THREE.Vector3(-half, y, sz),
+          new THREE.Vector3(half, y, sz),
+          isBorder ? strongColor : color,
+          opacity
+        )
+      );
+    }
   }
 
   function colorByHeight(THREE, h, hMax, options = {}) {
@@ -397,6 +519,12 @@
 
     try {
       cancelAnimationFrame(handle.raf);
+    } catch (e) {}
+
+    try {
+      if (handle.renderer && handle.onWheel) {
+        handle.renderer.domElement.removeEventListener("wheel", handle.onWheel);
+      }
     } catch (e) {}
 
     try {
@@ -589,6 +717,7 @@
       (hist.zBinWidth / zRange) * axisSize * (options.barGapFactor ?? 0.92);
 
     const group = new THREE.Group();
+    const opacity = options.opacity ?? 0.92;
 
     for (const b of hist.bars) {
       const h = scaleH(b.h);
@@ -599,8 +728,8 @@
         color: colorByHeight(THREE, b.h, hist.hMax, options),
         roughness: options.roughness ?? 0.55,
         metalness: options.metalness ?? 0.05,
-        transparent: options.opacity < 1,
-        opacity: options.opacity ?? 0.92
+        transparent: opacity < 1,
+        opacity
       });
 
       const mesh = new THREE.Mesh(geometry, material);
@@ -655,15 +784,20 @@
     }
 
     if (options.showGrid !== false) {
-      const grid = new THREE.GridHelper(
+      makeDiscretizationGrid(
+        THREE,
+        scene,
+        hist,
+        scaleX,
+        scaleZ,
         axisSize,
-        options.gridDivisions ?? 10,
-        options.gridColor ?? 0xcccccc,
-        options.gridSubColor ?? 0xe6e6e6
+        {
+          gridY: options.gridY ?? 0.001,
+          gridColor: options.gridColor ?? 0xd0d0d0,
+          gridStrongColor: options.gridStrongColor ?? 0xa8a8a8,
+          gridOpacity: options.gridOpacity ?? 1
+        }
       );
-
-      grid.position.y = 0;
-      scene.add(grid);
     }
 
     const showAxisLabels = options.showAxisLabels !== false;
@@ -827,7 +961,8 @@
       resizeObserver,
       raf,
       group,
-      histogram: hist
+      histogram: hist,
+      onWheel
     };
 
     HANDLES.set(container, handle);
